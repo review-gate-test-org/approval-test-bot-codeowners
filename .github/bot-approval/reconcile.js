@@ -84,11 +84,14 @@ const decide = ({ pr, files, reviews, codeowners, bot }) => {
     return dismiss(`@${bot} is not allowed to approve these files: ${blocked.map((f) => '`' + f + '`').join(', ')}`);
   }
 
-  const copilot = reviews.filter((r) => r.user.login === COPILOT && r.commit_id === sha).at(-1);
-  if (!copilot) return active.length
-    ? dismiss(`Copilot has not reviewed ${short(sha)}`)
-    : { action: 'wait', reason: `no Copilot review of ${short(sha)} yet` };
-  if (copilot.state === 'DISMISSED') return dismiss(`Copilot's review of ${short(sha)} was dismissed`);
+  // GitHub moves commit_id of a review dismissed by a push to the new head, so a DISMISSED review
+  // "of the head" may really be a stale review of an older commit. Only live reviews count.
+  const ofHead = reviews.filter((r) => r.user.login === COPILOT && r.commit_id === sha);
+  const copilot = ofHead.filter((r) => r.state !== 'DISMISSED').at(-1);
+  if (!copilot) {
+    const why = ofHead.length ? `Copilot's approval was dismissed` : `Copilot has not reviewed ${short(sha)}`;
+    return active.length ? dismiss(why) : { action: 'wait', reason: `${why}; waiting for a Copilot review of ${short(sha)}` };
+  }
   if (copilot.state !== 'APPROVED') return dismiss(`Copilot's latest review of ${short(sha)} is ${copilot.state}, not APPROVED`);
 
   if (active.some((r) => r.commit_id === sha)) return { action: 'none', reason: `already approved ${short(sha)}` };
@@ -131,20 +134,23 @@ const evaluate = async (github, repo, pr, ref, bot) => {
 // On a push, GitHub has already dismissed the bot's approval of the old commit. Say so once per commit.
 const commentOnPush = async ({ github, repo, pr, reviews, bot }) => {
   const sha = pr.head.sha;
-  const old = reviews.filter((r) => same(r.user.login, bot) && r.state === 'DISMISSED' && r.commit_id !== sha).at(-1);
-  if (!old) return;
+  // Don't compare commit_id: GitHub moves it to the new head when a push dismisses the review.
+  const mine = reviews.filter((r) => same(r.user.login, bot));
+  const old = mine.at(-1);
+  if (!old || old.state !== 'DISMISSED') return;
   const comments = await github.paginate(github.rest.issues.listComments, { ...repo, issue_number: pr.number, per_page: 100 });
   const tag = `${MARKER}<!-- push=${sha} -->`;
   if (comments.some((c) => c.body?.includes(tag))) return;
   await github.rest.issues.createComment({
     ...repo,
     issue_number: pr.number,
-    body: `${tag}\nℹ️ New commits since my approval of ${short(old.commit_id)}, so GitHub dismissed it. I will approve ${short(sha)} again once Copilot approves it.`,
+    body: `${tag}\nℹ️ New commits were pushed after my approval, so GitHub dismissed it. I will approve ${short(sha)} again once Copilot approves it.`,
   });
 };
 
 const WAIT_MS = 15 * 60_000;
 const POLL_MS = 30_000;
+const REQUEST_AFTER_MS = 3 * 60_000;
 
 /**
  * Entry point for actions/github-script.
@@ -168,40 +174,64 @@ const run = async ({ github, botApi, context, core, prNumber, wait = false, isPu
   for (let pr of prs) {
     if (pr.state !== 'open' || pr.base.ref !== base) continue;
     const sha = pr.head.sha;
-    let { result, reviews } = await evaluate(github, repo, pr, base, bot);
-    if (isPush) await commentOnPush({ github, repo, pr, reviews, bot });
+    const start = Date.now();
+    let requested = false;
 
-    const deadline = Date.now() + (wait ? waitMs : 0);
-    while (result.action === 'wait' && Date.now() < deadline) {
-      core.info(`#${pr.number}: ${result.reason}; waiting`);
+    // A push-triggered run keeps going until it approves, Copilot gives a non-approval, or the
+    // deadline passes. A dismissal does not end it: Copilot's review of the new commit may follow.
+    for (;;) {
+      const { result, reviews } = await evaluate(github, repo, pr, base, bot);
+      if (isPush) await commentOnPush({ github, repo, pr, reviews, bot });
+      core.info(`#${pr.number} ${short(sha)} -> ${result.action}: ${result.reason}`);
+
+      if (result.action === 'approve') {
+        await botApi.rest.pulls.createReview({
+          ...repo,
+          pull_number: pr.number,
+          commit_id: sha,
+          event: 'APPROVE',
+          body: approvalBody({ bot, sha, copilot: result.copilot, files: result.files, prUrl: pr.html_url }),
+        });
+        break;
+      }
+      if (result.action === 'dismiss') {
+        for (const r of result.dismiss) {
+          try {
+            await botApi.rest.pulls.dismissReview({
+              ...repo,
+              pull_number: pr.number,
+              review_id: r.id,
+              message: `Approval removed: ${result.reason}. I will approve again once Copilot approves the head commit.`,
+            });
+          } catch (e) {
+            // A push may have dismissed it a moment earlier.
+            if (e.status !== 422) throw e;
+            core.info(`review ${r.id} was already dismissed`);
+          }
+        }
+        if (!/has not reviewed|was dismissed/.test(result.reason)) break; // Copilot said no, or out of scope
+      }
+      if (result.action === 'none') break;
+      if (!wait || Date.now() - start >= waitMs) break;
+
+      // Copilot does not always review a push on its own (seen for a merge from the base branch).
+      if (!requested && Date.now() - start >= REQUEST_AFTER_MS) {
+        requested = true;
+        core.info(`#${pr.number}: no Copilot review yet; requesting one`);
+        try {
+          await github.rest.pulls.requestReviewers({ ...repo, pull_number: pr.number, reviewers: [COPILOT] });
+        } catch (e) {
+          core.warning(`could not request a Copilot review: ${e.message}`);
+        }
+      }
+
       await sleep(pollMs);
       const { data: fresh } = await github.rest.pulls.get({ ...repo, pull_number: pr.number });
       if (fresh.state !== 'open' || fresh.head.sha !== sha || fresh.base.ref !== base) {
-        result = { action: 'none', reason: 'head moved, base changed or PR closed' };
+        core.info(`#${pr.number}: head moved, base changed or PR closed; stopping`);
         break;
       }
       pr = fresh;
-      ({ result } = await evaluate(github, repo, pr, base, bot));
-    }
-
-    core.info(`#${pr.number} ${short(sha)} -> ${result.action}: ${result.reason}`);
-    if (result.action === 'approve') {
-      await botApi.rest.pulls.createReview({
-        ...repo,
-        pull_number: pr.number,
-        commit_id: sha,
-        event: 'APPROVE',
-        body: approvalBody({ bot, sha, copilot: result.copilot, files: result.files, prUrl: pr.html_url }),
-      });
-    } else if (result.action === 'dismiss') {
-      for (const r of result.dismiss) {
-        await botApi.rest.pulls.dismissReview({
-          ...repo,
-          pull_number: pr.number,
-          review_id: r.id,
-          message: `Approval removed: ${result.reason}. I will approve again once Copilot approves the head commit.`,
-        });
-      }
     }
   }
 };

@@ -65,3 +65,64 @@ test('approval body names the commit, the Copilot review and the files', () => {
   assert.match(body, /pullrequestreview-42/);
   assert.match(body, /`backend\/src\/a\.js`/);
 });
+
+test('waits when a push moved a stale-dismissed Copilot review to the new head', () => {
+  assert.equal(d({ reviews: [rev(COPILOT, 'DISMISSED')] }).action, 'wait');
+});
+
+test('dismiss reason says Copilot approval was dismissed', () => {
+  const r = d({ reviews: [rev(COPILOT, 'DISMISSED'), rev(BOT, 'APPROVED', SHA, 7)] });
+  assert.match(r.reason, /Copilot's approval was dismissed/);
+});
+
+// run(): fake GitHub that serves reviews from a script of states, one per poll.
+const { run } = require('./reconcile.js');
+const fakeRun = async (script) => {
+  let poll = 0;
+  const calls = [];
+  const reviewsNow = () => script[Math.min(poll, script.length - 1)];
+  const github = {
+    paginate: async (fn, args) => fn(args),
+    rest: {
+      repos: {
+        get: async () => ({ data: { default_branch: 'main' } }),
+        getContent: async () => ({ data: { content: Buffer.from(CODEOWNERS).toString('base64') } }),
+      },
+      pulls: {
+        get: async () => ({ data: { ...pr(), state: 'open', base: { ref: 'main' }, html_url: 'u' } }),
+        listFiles: async () => [{ filename: 'backend/src/a.js' }],
+        listReviews: async () => reviewsNow(),
+        requestReviewers: async () => calls.push('request'),
+      },
+      issues: { listComments: async () => [], createComment: async () => calls.push('comment') },
+    },
+  };
+  const botApi = {
+    rest: {
+      users: { getAuthenticated: async () => ({ data: { login: BOT } }) },
+      pulls: {
+        createReview: async () => calls.push('approve'),
+        dismissReview: async () => calls.push('dismiss'),
+      },
+    },
+  };
+  await run(
+    { github, botApi, context: { repo: { owner: 'o', repo: 'r' } }, core: { info() {}, warning() {} }, prNumber: 1, wait: true, isPush: true },
+    { waitMs: 10_000, pollMs: 1000, sleep: async () => { poll++; } },
+  );
+  return calls;
+};
+
+test('push run: dismisses the not-yet-dismissed approval, then keeps waiting and approves', async () => {
+  const calls = await fakeRun([
+    [rev(BOT, 'APPROVED', SHA, 7)],
+    [rev(BOT, 'DISMISSED', SHA, 7)],
+    [rev(BOT, 'DISMISSED', SHA, 7), rev(COPILOT, 'APPROVED')],
+  ]);
+  assert.deepEqual(calls.filter((c) => c !== 'comment'), ['dismiss', 'approve']);
+});
+
+test('push run: stops without approval when Copilot comments', async () => {
+  const calls = await fakeRun([[rev(COPILOT, 'COMMENTED')]]);
+  assert.deepEqual(calls, []);
+});

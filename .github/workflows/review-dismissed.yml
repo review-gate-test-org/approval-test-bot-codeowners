@@ -1,0 +1,15 @@
+name: Review dismissed
+
+# Trigger only. No secrets, no permissions, no checkout.
+# Its completion starts "Bot approval" (workflow_run), which runs from the default branch.
+on:
+  pull_request_review:
+    types: [dismissed]
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Review ${{ github.event.review.id }} by ${{ github.event.review.user.login }} on PR ${{ github.event.pull_request.number }} was dismissed"

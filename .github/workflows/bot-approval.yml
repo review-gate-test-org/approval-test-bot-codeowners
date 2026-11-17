@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write # request a Copilot review when none arrives
       issues: write # comment after a push dismissed the bot's approval
     steps:
       - uses: actions/checkout@v7

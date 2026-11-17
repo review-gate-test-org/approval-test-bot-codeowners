@@ -14,3 +14,4 @@ export function openTodos(todos) {
 export function todoCount(todos) {
   return todos.length;
 }
+// gate test: pushed after approval (pretend this is malicious)

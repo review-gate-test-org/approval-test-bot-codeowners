@@ -1,0 +1,66 @@
+name: Bot approval
+
+# Keeps approval-test-bot's approval in sync with Copilot code review (see .github/bot-approval/reconcile.js):
+#   Copilot APPROVED the head commit + bot owns every changed file -> bot approves, with the reason.
+#   Copilot's approval gone (dismissed, replaced, files out of scope) -> bot dismisses its approval, with the reason.
+#
+# Why no pull_request_review trigger here:
+#   - GitHub holds runs triggered by Copilot's review ("Approve workflows to run").
+#   - pull_request_review runs the PR branch's workflow file, so a PR could change it and use APPROVER_TOKEN.
+# Instead:
+#   - pull_request_target: the run for a push waits up to 15 min for Copilot's review of that commit.
+#   - workflow_run of "Review dismissed": a human dismissed a review -> re-check that PR.
+#   - schedule / workflow_dispatch: sweep all open PRs (late Copilot reviews, re-reviews).
+# All of these run the default branch's workflow and script. PR code is never checked out.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  workflow_run:
+    workflows: [Review dismissed]
+    types: [completed]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number (empty = all open PRs)
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: bot-approval-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || 'sweep' }}
+  # A newer push cancels the run that waits for the older commit. Other events queue behind it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write # comment after a push dismissed the bot's approval
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/bot-approval
+          persist-credentials: false
+      - uses: actions/github-script@v9
+        env:
+          APPROVER_TOKEN: ${{ secrets.APPROVER_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}
+          IS_PUSH: ${{ github.event_name == 'pull_request_target' }}
+        with:
+          retries: 3
+          script: |
+            if (!process.env.APPROVER_TOKEN) return core.setFailed('APPROVER_TOKEN secret is not set');
+            const botApi = getOctokit(process.env.APPROVER_TOKEN);
+            const isPush = process.env.IS_PUSH === 'true';
+            await require('./.github/bot-approval/reconcile.js').run({
+              github, botApi, context, core,
+              prNumber: process.env.PR,
+              wait: isPush,
+              isPush: isPush && context.payload.action === 'synchronize',
+            });

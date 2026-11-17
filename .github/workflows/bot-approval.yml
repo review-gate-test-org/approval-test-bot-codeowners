@@ -3,6 +3,8 @@ name: Bot approval
 # Keeps approval-test-bot's approval in sync with Copilot code review (see .github/bot-approval/reconcile.js):
 #   Copilot APPROVED the head commit + bot owns every changed file -> bot approves, with the reason.
 #   Copilot's approval gone (dismissed, replaced, files out of scope) -> bot dismisses its approval, with the reason.
+#   Every run posts the `copilot-gate` check on the head SHA. Make it a required check: a push after
+#   the bot's approval then blocks the merge until a run has checked the new commit.
 #
 # Why no pull_request_review trigger here:
 #   - GitHub holds runs triggered by Copilot's review ("Approve workflows to run").
@@ -41,6 +43,7 @@ jobs:
       contents: read
       pull-requests: write # request a Copilot review when none arrives
       issues: write # comment after a push dismissed the bot's approval
+      checks: write # copilot-gate check run on the head SHA
     steps:
       - uses: actions/checkout@v7
         with:

@@ -23,6 +23,20 @@ The `main` ruleset requires 1 approval, code-owner review, dismisses stale appro
 
 Triggers: push (waits up to 15 min for Copilot), a dismissed review (via `review-dismissed.yml` → `workflow_run`), every 15 min, and manual dispatch. No trigger on Copilot's review itself, because GitHub holds those runs for a manual click.
 
+### `copilot-gate` check
+
+Every run posts a check run named `copilot-gate` on the PR's head commit. The ruleset requires it (source: GitHub Actions).
+
+| Gate | When |
+|---|---|
+| ✅ success | The bot has no active approval (human code owners decide), or the bot's approval and Copilot's approval are both for the head commit |
+| ❌ failure | The bot has an active approval that is not valid for the head commit, or the run failed |
+| ⏳ in progress / missing | A run is checking or waiting. Merge is blocked |
+
+Why: a check belongs to one commit. If someone pushes after the bot approved, the new commit has no gate result, so the merge blocks until a run has checked it. This works even if the branch rules do not dismiss stale approvals.
+
+Limit: any workflow with `checks: write` can post a check with this name. Here `.github/` is code-owned by a human, so a PR cannot add such a workflow without a human review. A GitHub App as the check source would close this fully.
+
 ## Try it
 
 1. Add this repo to the bot's fine-grained PAT (Pull requests: read/write, Contents: read).

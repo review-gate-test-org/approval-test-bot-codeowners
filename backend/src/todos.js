@@ -6,3 +6,7 @@ export function addTodo(todos, title) {
 export function completeTodo(todos, id) {
   return todos.map((t) => (t.id === id ? { ...t, done: true } : t));
 }
+
+export function openTodos(todos) {
+  return todos.filter((t) => !t.done);
+}

@@ -10,3 +10,7 @@ export function completeTodo(todos, id) {
 export function openTodos(todos) {
   return todos.filter((t) => !t.done);
 }
+
+export function todoCount(todos) {
+  return todos.length;
+}

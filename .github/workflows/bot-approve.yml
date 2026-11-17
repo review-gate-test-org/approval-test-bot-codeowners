@@ -1,0 +1,27 @@
+# Manual test: approve a PR as approval-test-bot with its PAT (secret APPROVER_TOKEN).
+name: Bot approve
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number
+        required: true
+permissions: {}
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the token belongs to the bot
+        env:
+          GH_TOKEN: ${{ secrets.APPROVER_TOKEN }}
+        run: |
+          login=$(gh api user --jq .login)
+          if [ "$login" != "approval-test-bot" ]; then
+            echo "::error::APPROVER_TOKEN belongs to '$login', expected 'approval-test-bot'"
+            exit 1
+          fi
+      - name: Approve
+        env:
+          GH_TOKEN: ${{ secrets.APPROVER_TOKEN }}
+          PR: ${{ inputs.pr }}
+        run: gh pr review "$PR" --repo "$GITHUB_REPOSITORY" --approve --body "Approved by approval-test-bot (manual test)."

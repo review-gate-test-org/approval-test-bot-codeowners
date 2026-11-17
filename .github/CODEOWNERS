@@ -1,0 +1,7 @@
+# Last matching line wins.
+# Catch-all for everything not listed below (.github/, README.md, ...): humans only.
+*           @JacobiCamunda
+
+# Only the backend lists the machine user. Its approval satisfies code-owner review here and nowhere else.
+/backend/   @review-gate-test-org/backend @approval-test-bot
+/frontend/  @review-gate-test-org/frontend
